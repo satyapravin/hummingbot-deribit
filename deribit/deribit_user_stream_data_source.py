@@ -16,6 +16,8 @@ if TYPE_CHECKING:
 class DeribitUserStreamDataSource(UserStreamTrackerDataSource):
     _logger: Optional[HummingbotLogger] = None
     cred = { "expires_at": 0 }
+    ws: WSAssistant = None
+
 
     def __init__(
         self,
@@ -31,48 +33,40 @@ class DeribitUserStreamDataSource(UserStreamTrackerDataSource):
         self._auth = auth
         self._trading_pairs = trading_pairs
         self._connector = connector
-        self._pong_response_event = None
+        self.loop = asyncio.get_event_loop()
+        self.loop.create_task(
+            self._refresh_auth()
+        )
 
     async def _authenticate(self, ws: WSAssistant):
-        """
-        Authenticates user to websocket
-        """
-        await self._get_credentials(ws)
-        
-    async def _get_credentials(self, ws: WSAssistant):
         now = time.time()
-        expires_at = self.cred["expires_at"]
-        
-        if "access_token" in self.cred and now < expires_at:
-            print("cached...")
-            return self.cred
-        
-        if "refresh_token" in self.cred and now > expires_at:
-            print("refreshed...")
-            payload = self._auth.get_ws_auth_refresh_payload(self.cred["refresh_token"])
-            login_request: WSJSONRequest = WSJSONRequest(payload=payload)
-            await ws.send(login_request)
-            response: WSResponse = await ws.receive()
-            m = response.data
-            
-            now = time.time()
-            self.cred = m["result"]
-            self.cred["expires_at"] = now + self.cred["expires_in"]
-            return self.cred
-            
-        print("new...")
         payload = self._auth.get_ws_auth_payload()
         login_request: WSJSONRequest = WSJSONRequest(payload=payload)
+        print("[WS AUTH] Logging in...")
         await ws.send(login_request)
         response: WSResponse = await ws.receive()
-        m = response.data
-        
-        now = time.time()
-        self.cred = m["result"]
-        self.cred["expires_at"] = now + self.cred["expires_in"]
-        
-        return self.cred
 
+        now = time.time()
+        self.cred = response.data["result"]
+        self.cred["expires_at"] = now + self.cred["expires_in"]
+        print("[WS AUTH] Logged in!")
+        
+    async def _refresh_auth(self):
+        while True:
+            now = time.time()
+            expires_at = self.cred["expires_at"]
+            
+            if self.ws is not None and expires_at > 0 and now > expires_at:
+                payload = self._auth.get_ws_auth_refresh_payload(self.cred["refresh_token"])
+                login_request: WSJSONRequest = WSJSONRequest(payload=payload)
+                await self.ws.send(login_request)
+                response: WSResponse = await self.ws.receive()
+
+                self.cred = response.data["result"]
+                self.cred["expires_at"] = now + self.cred["expires_in"]
+
+            await asyncio.sleep(150)
+        
     async def _process_websocket_messages(self, websocket_assistant: WSAssistant, queue: asyncio.Queue):
         while True:
             try:
@@ -80,19 +74,21 @@ class DeribitUserStreamDataSource(UserStreamTrackerDataSource):
                     super()._process_websocket_messages(websocket_assistant=websocket_assistant, queue=queue),
                     timeout=CONSTANTS.SECONDS_TO_WAIT_TO_RECEIVE_MESSAGE)
             except asyncio.TimeoutError:
-                if self._pong_response_event and not self._pong_response_event.is_set():
-                    # The PONG response for the previous PING request was never received
-                    raise IOError("The user stream channel is unresponsive (pong response not received)")
-                self._pong_response_event = asyncio.Event()
-                await self._send_ping(websocket_assistant=websocket_assistant)
+                await self.heartbeat_response(websocket_assistant)
 
     async def _process_event_message(self, event_message: Dict[str, Any], queue: asyncio.Queue):
-        self.logger().info("[USER EVT]")
-        # self.logger().info(event_message)
+        params = event_message.get("params")
+        method = event_message.get("method")
+        
+        if method == "heartbeat":
+            await self.heartbeat_response(self.ws)
+            return
+        
+        print("[USER EV]", event_message)
+        
+        if "jsonrpc" in event_message:
+            queue.put_nowait(event_message)
 
-    async def _send_ping(self, websocket_assistant: WSAssistant):
-        pass
-    
     async def establish_hearbeat(self, websocket_assistant: WSAssistant):
         payload = {
             "jsonrpc": "2.0",
@@ -116,11 +112,10 @@ class DeribitUserStreamDataSource(UserStreamTrackerDataSource):
 
         req: WSJSONRequest = WSJSONRequest(payload=payload)
         await websocket_assistant.send(req)
+        print("[US PONG]")
 
     async def _subscribe_channels(self, websocket_assistant: WSAssistant):
         try:
-            cred = await self._get_credentials(websocket_assistant)
-            
             channels = [
                 "user.portfolio.btc",
                 "user.portfolio.eth",
@@ -146,10 +141,10 @@ class DeribitUserStreamDataSource(UserStreamTrackerDataSource):
             raise
 
     async def _connected_websocket_assistant(self) -> WSAssistant:
-        ws: WSAssistant = await self._api_factory.get_ws_assistant()
-        await ws.connect(
+        self.ws = await self._api_factory.get_ws_assistant()
+        await self.ws.connect(
             ws_url=CONSTANTS.WSS_BASE_URL,
             message_timeout=CONSTANTS.SECONDS_TO_WAIT_TO_RECEIVE_MESSAGE)
-        await self._authenticate(ws)
-        await self.establish_hearbeat(ws)
-        return ws
+        await self._authenticate(self.ws)
+        await self.establish_hearbeat(self.ws)
+        return self.ws

@@ -11,7 +11,7 @@ class LogPricesExample(ScriptStrategyBase):
     """
     
     base = "BTC"
-    quote = "USD"
+    quote = "USDC"
     pair = combine_to_hb_trading_pair(base, quote)
 
     markets = {

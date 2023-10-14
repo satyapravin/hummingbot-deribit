@@ -177,24 +177,16 @@ class DeribitExchange(ExchangePyBase):
         """
         async for event_message in self._iter_user_event_queue():
             try:
-                # print("[USER EVT]")
-                # print(event_message)
-
-                if type(event_message) is str: return
-                    
-                endpoint = event_message["arg"]["channel"]
-                payload = event_message["data"]
+                print("[USER EVT]")
+                print(event_message)
+                params = event_message.get("params")
                 
-                # print(endpoint)
-                # print(payload)
+                if params is None: return
 
-                if endpoint == CONSTANTS.WS_SUBSCRIPTION_ORDERS_ENDPOINT_NAME:
-                    for order_msg in payload:
-                        self._process_trade_event_message(order_msg)
-                        self._process_order_event_message(order_msg)
-                elif endpoint == CONSTANTS.WS_SUBSCRIPTION_WALLET_ENDPOINT_NAME:
-                    for wallet_msg in payload:
-                        self._process_wallet_event_message(wallet_msg)
+                channel = params.get("channel")
+                
+                if "portfolio" in channel:
+                    self._process_wallet_event_message(params["data"])
                         
             except asyncio.CancelledError:
                 raise
@@ -242,10 +234,11 @@ class DeribitExchange(ExchangePyBase):
         Updates account balances.
         :param wallet_msg: The account balance update message payload
         """
-        symbol = wallet_msg.get("coinName", None)
+        symbol = wallet_msg.get("currency", None)
         if symbol is not None:
-            available = Decimal(str(wallet_msg["available"]))
+            available = Decimal(str(wallet_msg["available_funds"]))
             self._account_available_balances[symbol] = available
+            print(symbol, available)
 
     #endregion
     
@@ -373,31 +366,38 @@ class DeribitExchange(ExchangePyBase):
                            **kwargs) -> Tuple[str, float]:
         
         data = {
-            "side": trade_type.name.lower(),
-            "symbol": await self.exchange_symbol_associated_to_pair(trading_pair),
-            "quantity": str(amount),
-            "orderType": order_type.name.lower(),
-            "force": CONSTANTS.DEFAULT_TIME_IN_FORCE,
-            "clientOrderId": order_id,
+            "instrument_name": await self.exchange_symbol_associated_to_pair(trading_pair),
+            "amount": str(amount),
+            "type": order_type.name.lower(),
+            "label": order_id,
         }
+        
+        url = CONSTANTS.BUY if trade_type == TradeType.BUY else CONSTANTS.SELL
         
         if order_type.is_limit_type():
             data["price"] = str(price)
-            
-        # For market buy orders quantity is quote or notional value
-        if not order_type.is_limit_type() and trade_type == TradeType.BUY:
-            data["quantity"] = str(price * amount)
 
-        resp = await self._api_post(
-            path_url=CONSTANTS.ORDER,
-            data=data,
+        r = await self._api_post(
+            path_url=url,
+            params=data,
             is_auth_required=True,
         )
+        
+        error = r.get("error")
+        result = r.get("result")
+        
+        if error:
+            code = error.get("code", "[NO CODE]")
+            message = error.get("message", "[UKNOWN ERROR]")
+            raise IOError(f"Error submitting order {order_id}: {code} - {message}")
+        
+        else:
+            order = result.get("order", {})
+            id = order.get("order_id", None)
+            if id is None:
+                raise IOError(f"Error submitting order {order_id}: Order missing in response!")
+            return id
 
-        if resp["code"] != CONSTANTS.RET_CODE_OK:
-            raise IOError(f"Error submitting order {order_id}: {resp['code']} - {resp['msg']}")
-
-        return str(resp["data"]["orderId"]), self.current_timestamp
 
     async def _place_cancel(self, order_id: str, tracked_order: InFlightOrder):
         """

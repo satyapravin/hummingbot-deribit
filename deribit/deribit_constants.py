@@ -18,7 +18,7 @@ DEFAULT_DOMAIN = ""
 
 CLIENT_ID_PREFIX = "DRBT-"
 MAX_ID_LEN = 32
-SECONDS_TO_WAIT_TO_RECEIVE_MESSAGE = 30
+SECONDS_TO_WAIT_TO_RECEIVE_MESSAGE = 60
 
 DEFAULT_TIME_IN_FORCE = "normal"
 
@@ -30,6 +30,11 @@ INSTRUMENTS = "public/get_instruments"
 TICKER = "public/ticker"
 TIME = "public/get_time"
 ORDER_BOOK = "public/get_order_book"
+BUY = "private/buy"
+SELL = "private/sell"
+EDIT = "private/edit"
+CANCEL = "private/cancel"
+ORDER = "private/get_order_state"
 
 # Private routes
 ACCOUNT = "private/get_account_summary"

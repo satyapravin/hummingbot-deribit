@@ -17,6 +17,7 @@ if TYPE_CHECKING:
 class DeribitAPIOrderBookDataSource(OrderBookTrackerDataSource):
 
     _logger: Optional[HummingbotLogger] = None
+    ws: WSAssistant = None
 
     def __init__(self,
                  trading_pairs: List[str],
@@ -25,8 +26,12 @@ class DeribitAPIOrderBookDataSource(OrderBookTrackerDataSource):
         super().__init__(trading_pairs)
         self._connector = connector
         self._api_factory = api_factory
-        self._pong_response_event = None
-
+        self._heartbeat_response_pending = False
+        self.loop = asyncio.get_event_loop()
+        self.loop.create_task(
+            self.monitor_heartbeat()
+        )
+        
     async def get_last_traded_prices(self,
                                      trading_pairs: List[str],
                                      domain: Optional[str] = None) -> Dict[str, float]:
@@ -97,22 +102,50 @@ class DeribitAPIOrderBookDataSource(OrderBookTrackerDataSource):
         message_queue.put_nowait(snapshot_msg)
 
     async def _parse_trade_message(self, raw_message: Dict[str, Any], message_queue: asyncio.Queue):
-        print("[Deribit Method] (Trades) Not Implemented!")
+        params = raw_message["params"]
+        data_arr = params["data"]
+
+        for data in data_arr:
+            symbol = data["instrument_name"]
+            timestamp = float(data["timestamp"])
+            trade_id = data["trade_id"]
+            trade_type = float(TradeType.BUY.value) if data["direction"] == "buy" else float(TradeType.SELL.value)
+            trading_pair = await self._connector.trading_pair_associated_to_exchange_symbol(symbol=symbol)
+            
+            message_content = {
+                "trade_id": trade_id,
+                "trading_pair": trading_pair,
+                "trade_type": trade_type,
+                "amount": data["amount"],
+                "price": data["price"],
+            }
+            
+            trade_message = OrderBookMessage(
+                message_type=OrderBookMessageType.TRADE,
+                content=message_content,
+                timestamp=timestamp,
+            )
+            
+            message_queue.put_nowait(trade_message)
 
     def _channel_originating_message(self, event_message: Dict[str, Any]) -> str:
         params = event_message.get("params")
         result = event_message.get("result")
+        method = event_message.get("method")
+        
+        if method == "heartbeat":
+            self._heartbeat_response_pending  = True
+            return
         
         if params:
-            if "book" in params["channel"]:
+            if "book" in params.get("channel", ""):
                 print("[BOOK EVT]")
                 return self._snapshot_messages_queue_key
-                
-        if result:
-            if "trades" in result[0]:
-                print("[TRADES EVT]")
-                return self._trade_messages_queue_key
             
+            if "trades" in params.get("channel", ""):
+                print("[TRADE EVT]")
+                return self._trade_messages_queue_key
+                   
         self.logger().info("[UNKOWN OB EVT]")
         self.logger().info(event_message)
         return ""
@@ -124,11 +157,10 @@ class DeribitAPIOrderBookDataSource(OrderBookTrackerDataSource):
                     super()._process_websocket_messages(websocket_assistant=websocket_assistant),
                     timeout=CONSTANTS.SECONDS_TO_WAIT_TO_RECEIVE_MESSAGE)
             except asyncio.TimeoutError:
-                if self._pong_response_event and not self._pong_response_event.is_set():
-                    # The PONG response for the previous PING request was never received
-                    raise IOError("The user stream channel is unresponsive (pong response not received)")
-                self._pong_response_event = asyncio.Event()
-                await self._send_ping(websocket_assistant=websocket_assistant)
+                if self._heartbeat_response_pending:
+                    self.heartbeat_response(websocket_assistant)
+                else:
+                    raise IOError("Deribit order book stream in unresponsive")
     
     async def _subscribe_channels(self, ws: WSAssistant):
         try:
@@ -157,12 +189,44 @@ class DeribitAPIOrderBookDataSource(OrderBookTrackerDataSource):
             self.logger().exception("Unexpected error occurred subscribing to Bitget public streams...")
             raise
         
-    async def _send_ping(self, websocket_assistant: WSAssistant):
-        raise "[Deribit Method] Not Implemented!"
+    async def establish_hearbeat(self, websocket_assistant: WSAssistant):
+        payload = {
+            "jsonrpc": "2.0",
+            "id": 9098,
+            "method": "public/set_heartbeat",
+            "params": {
+                        "interval": 10
+                        }
+        }
+
+        req: WSJSONRequest = WSJSONRequest(payload=payload)
+        await websocket_assistant.send(req)
+        
+    async def heartbeat_response(self, websocket_assistant: WSAssistant) -> None:
+        self._heartbeat_response_pending = False
+        payload = {
+            "jsonrpc": "2.0",
+            "id": 8212,
+            "method": "public/test",
+            "params": {}
+        }
+
+        req: WSJSONRequest = WSJSONRequest(payload=payload)
+        await websocket_assistant.send(req)
+        print("[OB PONG]")
+
+    async def monitor_heartbeat(self):
+        while True:
+            if self.ws is not None and self._heartbeat_response_pending:
+                self._heartbeat_response_pending = False
+                await self.heartbeat_response(self.ws)
+                
+            await asyncio.sleep(1)
 
     async def _connected_websocket_assistant(self) -> WSAssistant:
-        ws: WSAssistant = await self._api_factory.get_ws_assistant()
-        await ws.connect(
+        self.ws: WSAssistant = await self._api_factory.get_ws_assistant()
+        await self.ws.connect(
             ws_url=CONSTANTS.WSS_BASE_URL, message_timeout=CONSTANTS.SECONDS_TO_WAIT_TO_RECEIVE_MESSAGE
         )
-        return ws
+        await self.establish_hearbeat(self.ws)
+        return self.ws
