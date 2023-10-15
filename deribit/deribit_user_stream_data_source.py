@@ -77,16 +77,13 @@ class DeribitUserStreamDataSource(UserStreamTrackerDataSource):
                 await self.heartbeat_response(websocket_assistant)
 
     async def _process_event_message(self, event_message: Dict[str, Any], queue: asyncio.Queue):
-        params = event_message.get("params")
         method = event_message.get("method")
         
         if method == "heartbeat":
             await self.heartbeat_response(self.ws)
             return
         
-        print("[USER EV]", event_message)
-        
-        if "jsonrpc" in event_message:
+        if method == "subscription":
             queue.put_nowait(event_message)
 
     async def establish_hearbeat(self, websocket_assistant: WSAssistant):
@@ -112,14 +109,11 @@ class DeribitUserStreamDataSource(UserStreamTrackerDataSource):
 
         req: WSJSONRequest = WSJSONRequest(payload=payload)
         await websocket_assistant.send(req)
-        print("[US PONG]")
 
     async def _subscribe_channels(self, websocket_assistant: WSAssistant):
         try:
             channels = [
-                "user.portfolio.btc",
-                "user.portfolio.eth",
-                "user.portfolio.usdc"
+                "user.changes.any.any.100ms",
             ]
             
             payload = {

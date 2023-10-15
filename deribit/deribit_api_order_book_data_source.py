@@ -139,11 +139,9 @@ class DeribitAPIOrderBookDataSource(OrderBookTrackerDataSource):
         
         if params:
             if "book" in params.get("channel", ""):
-                print("[BOOK EVT]")
                 return self._snapshot_messages_queue_key
             
             if "trades" in params.get("channel", ""):
-                print("[TRADE EVT]")
                 return self._trade_messages_queue_key
                    
         self.logger().info("[UNKOWN OB EVT]")
@@ -213,7 +211,6 @@ class DeribitAPIOrderBookDataSource(OrderBookTrackerDataSource):
 
         req: WSJSONRequest = WSJSONRequest(payload=payload)
         await websocket_assistant.send(req)
-        print("[OB PONG]")
 
     async def monitor_heartbeat(self):
         while True:

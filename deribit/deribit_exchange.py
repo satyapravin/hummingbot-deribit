@@ -1,8 +1,6 @@
 import asyncio
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
-import copy
-import time
 import re
 import json
 
@@ -19,7 +17,7 @@ from hummingbot.connector.exchange_base import s_decimal_NaN
 from hummingbot.connector.exchange_py_base import ExchangePyBase
 from hummingbot.connector.trading_rule import TradingRule
 from hummingbot.connector.utils import combine_to_hb_trading_pair
-from hummingbot.core.data_type.common import OrderType, TradeType
+from hummingbot.core.data_type.common import OrderType, TradeType, PositionAction
 from hummingbot.core.data_type.in_flight_order import InFlightOrder, OrderState, OrderUpdate, TradeUpdate
 from hummingbot.core.data_type.order_book_tracker_data_source import OrderBookTrackerDataSource
 from hummingbot.core.data_type.trade_fee import TokenAmount, TradeFeeBase
@@ -39,7 +37,7 @@ def get_api_error(error_string):
         
         try:
             error_dict = json.loads(json_string)
-            if "msg" in error_dict and "code" in error_dict:
+            if "error" in error_dict:
                 return error_dict
             else:
                 return None
@@ -154,23 +152,20 @@ class DeribitExchange(ExchangePyBase):
 
     #region Streams
     def _create_order_book_data_source(self) -> OrderBookTrackerDataSource:
-        d = DeribitAPIOrderBookDataSource(
+        return DeribitAPIOrderBookDataSource(
             trading_pairs=self.trading_pairs,
             connector=self,
             api_factory=self._web_assistants_factory)
-        return d
     
     def _create_user_stream_data_source(self) -> UserStreamTrackerDataSource:
-        d = DeribitUserStreamDataSource(
+        return DeribitUserStreamDataSource(
             auth=self._auth,
             trading_pairs=self._trading_pairs,
             connector=self,
             api_factory=self._web_assistants_factory,
             domain=self._domain,
         )
-        
-        return d
-        
+
     async def _user_stream_event_listener(self):
         """
         Listens to message in _user_stream_tracker.user_stream queue.
@@ -185,6 +180,15 @@ class DeribitExchange(ExchangePyBase):
 
                 channel = params.get("channel")
                 
+                if "user.changes" in channel:
+                    data = params.get("data")
+                    if data:
+                        trades = data.get("trades", None)
+                        orders = data.get("orders", None)
+                        
+                        if trades: self._process_trade_event_message(trades)
+                        if orders: self._process_order_event_message(orders)
+                
                 if "portfolio" in channel:
                     self._process_wallet_event_message(params["data"])
                         
@@ -193,15 +197,18 @@ class DeribitExchange(ExchangePyBase):
             except Exception:
                 self.logger().exception("Unexpected error in user stream listener loop.")
 
-    def _process_order_event_message(self, order_msg: Dict[str, Any]):
+    def _process_order_event_message(self, order_msg: List[Dict[str, Any]]):
         """
         Updates in-flight order and triggers cancellation or failure event if needed.
 
         :param order_msg: The order event message payloadsto
         """
-        order_status = CONSTANTS.WS_ORDER_STATE[order_msg["status"]]
-        client_order_id = str(order_msg["clOrdId"])
-        updatable_order = self._order_tracker.all_updatable_orders.get(client_order_id)
+        
+        for order in order_msg:
+            order_status = CONSTANTS.ORDER_STATE[order["order_state"]]
+            order_id = order["order_id"]
+            client_order_id = str(order["label"])
+            updatable_order = self._order_tracker.all_updatable_orders.get(client_order_id)
 
         if updatable_order is not None:
             new_order_update: OrderUpdate = OrderUpdate(
@@ -209,25 +216,26 @@ class DeribitExchange(ExchangePyBase):
                 update_timestamp=self.current_timestamp,
                 new_state=order_status,
                 client_order_id=client_order_id,
-                exchange_order_id=order_msg["ordId"],
+                exchange_order_id=order_id,
             )
             self._order_tracker.process_order_update(new_order_update)
 
-    def _process_trade_event_message(self, trade_msg: Dict[str, Any]):
+    def _process_trade_event_message(self, trade_msg: List[Dict[str, Any]]):
         """
         Updates in-flight order and trigger order filled event for trade message received. Triggers order completed
         event if the total executed amount equals to the specified order amount.
 
         :param trade_msg: The trade event message payload
         """
+        
+        for trade in trade_msg:
+            order_id = trade["order_id"]
+            fillable_order = self._order_tracker.all_fillable_orders_by_exchange_order_id.get(order_id)
 
-        client_order_id = str(trade_msg["clOrdId"])
-        fillable_order = self._order_tracker.all_fillable_orders.get(client_order_id)
-
-        if fillable_order is not None and "tradeId" in trade_msg:
-            trade_update = self._parse_websocket_trade_update(trade_msg=trade_msg, tracked_order=fillable_order)
-            if trade_update:
-                self._order_tracker.process_trade_update(trade_update)
+            if fillable_order is not None:
+                trade_update = self._parse_trade_update(trade_msg=trade, tracked_order=fillable_order)
+                if trade_update:
+                    self._order_tracker.process_trade_update(trade_update)
                 
     def _process_wallet_event_message(self, wallet_msg: Dict[str, Any]):
         """
@@ -238,7 +246,6 @@ class DeribitExchange(ExchangePyBase):
         if symbol is not None:
             available = Decimal(str(wallet_msg["available_funds"]))
             self._account_available_balances[symbol] = available
-            print(symbol, available)
 
     #endregion
     
@@ -335,9 +342,9 @@ class DeribitExchange(ExchangePyBase):
                 trading_rules.append(
                     TradingRule(
                         trading_pair=await self.trading_pair_associated_to_exchange_symbol(symbol=info["instrument_name"]),
-                        min_order_size=Decimal(info["contract_size"]),
-                        min_price_increment=Decimal(info["tick_size"]),
-                        min_base_amount_increment=Decimal("1"),
+                        min_order_size=Decimal(str(info["min_trade_amount"])),
+                        min_price_increment=Decimal(str(info["tick_size"])),
+                        min_base_amount_increment=Decimal(str(info["contract_size"])),
                     )
                 )
                 
@@ -355,7 +362,7 @@ class DeribitExchange(ExchangePyBase):
 
     #endregion
     
-    #region orders
+    #region orders 
     async def _place_order(self,
                            order_id: str,
                            trading_pair: str,
@@ -376,13 +383,13 @@ class DeribitExchange(ExchangePyBase):
         
         if order_type.is_limit_type():
             data["price"] = str(price)
-
-        r = await self._api_post(
+            
+        r = await self._api_get(
             path_url=url,
             params=data,
             is_auth_required=True,
         )
-        
+
         error = r.get("error")
         result = r.get("result")
         
@@ -394,9 +401,11 @@ class DeribitExchange(ExchangePyBase):
         else:
             order = result.get("order", {})
             id = order.get("order_id", None)
+            
             if id is None:
                 raise IOError(f"Error submitting order {order_id}: Order missing in response!")
-            return id
+            
+            return id, self.current_timestamp
 
 
     async def _place_cancel(self, order_id: str, tracked_order: InFlightOrder):
@@ -404,35 +413,43 @@ class DeribitExchange(ExchangePyBase):
         This implementation specific function is called by _cancel, and returns True if successful
         """
         try:
-            data = {
-                "symbol": await self.exchange_symbol_associated_to_pair(tracked_order.trading_pair),
-                "orderId": tracked_order.exchange_order_id
+            params = {
+                "order_id": tracked_order.exchange_order_id
             }
-            
-            res = await self._api_post(
-                path_url=CONSTANTS.CANCEL_ORDER,
-                data=data,
+
+            r = await self._api_get(
+                path_url=CONSTANTS.CANCEL,
+                params=params,
                 is_auth_required=True,
             )
             
-            response_code = res["code"]
+            result = r.get("result")
+            error = r.get("error")
 
-            if response_code != CONSTANTS.RET_CODE_OK:
-                if response_code == CONSTANTS.RET_CODE_ORDER_NOT_EXISTS:
-                    await self._order_tracker.process_order_not_found(order_id)
+            if error:
+                code = error.get("code", "[NO CODE]")
+                message = error.get("message", "[UKNOWN ERROR]")
+                raise IOError(f"Error cancelling order {tracked_order.exchange_order_id}: {code} - {message}")
+            
+            else:
+                return True
+            
+            # if response_code != CONSTANTS.RET_CODE_OK:
+            #     if response_code == CONSTANTS.RET_CODE_ORDER_NOT_EXISTS:
+            #         await self._order_tracker.process_order_not_found(order_id)
                     
-                raise IOError(f"{res['code']} - {res['msg']}")
+            #     raise IOError(f"{res['code']} - {res['msg']}")
 
-            return True
+            
         except Exception as ex:
             api_err = get_api_error(str(ex))
 
             if api_err:
-                if api_err["code"] == CONSTANTS.RET_CODE_ORDER_NOT_EXISTS:
+                err = api_err.get("error")
+                if err["code"] == CONSTANTS.RET_CODE_ORDER_NOT_EXISTS:
                     await self._order_tracker.process_order_not_found(order_id)
                     self.logger().info(f"{order_id} not found, now marked as cancelled !")
                     return True
-                    # raise IOError(f"{api_err['code']} - {api_err['msg']}")
                 
             raise ex
 
@@ -441,45 +458,30 @@ class DeribitExchange(ExchangePyBase):
 
         if order.exchange_order_id is not None:
             try:
-                all_fills_response = await self._request_order_fills(order=order)
-                fills_data = all_fills_response.get("data", [])
-
-                for fill_data in fills_data:
-                    trade_update = self._parse_trade_update(trade_msg=fill_data, tracked_order=order)
+                data = await self._request_order_trades_data(tracked_order=order)
+                if data is None: raise "Not found"
+                
+                for trade in data:
+                    trade_update = self._parse_trade_update(trade, order)
                     trade_updates.append(trade_update)
+            
             except IOError as ex:
                 if not self._is_request_exception_related_to_time_synchronizer(request_exception=ex):
                     raise
 
         return trade_updates
 
-    async def _request_order_fills(self, order: InFlightOrder) -> Dict[str, Any]:
-        exchange_symbol = await self.exchange_symbol_associated_to_pair(order.trading_pair)
-        data = {
-            "orderId": order.exchange_order_id,
-            "symbol": exchange_symbol,
-        }
-        
-        res = await self._api_post(
-            path_url=CONSTANTS.ORDER_FILLS,
-            data=data,
-            is_auth_required=True,
-        )
-
-        return res
-
     async def _request_order_status(self, tracked_order: InFlightOrder) -> OrderUpdate:
         try:
-            order_status_data = await self._request_order_status_data(tracked_order=tracked_order)
-            order_msg = order_status_data["data"][0]
-            client_order_id = str(order_msg["clientOrderId"])
+            data = await self._request_order_status_data(tracked_order=tracked_order)
+            if data is None: raise "Not found"
 
             order_update: OrderUpdate = OrderUpdate(
                 trading_pair=tracked_order.trading_pair,
                 update_timestamp=self.current_timestamp,
-                new_state=CONSTANTS.ORDER_STATE[order_msg["status"]],
-                client_order_id=client_order_id,
-                exchange_order_id=order_msg["orderId"],
+                new_state=CONSTANTS.ORDER_STATE[data["order_status"]],
+                client_order_id=tracked_order.client_order_id,
+                exchange_order_id=tracked_order.exchange_order_id
             )
 
             return order_update
@@ -497,82 +499,70 @@ class DeribitExchange(ExchangePyBase):
                 raise
 
         return order_update
+    
+    async def _request_order_trades_data(self, tracked_order: InFlightOrder) -> Dict:
 
-    async def _request_order_status_data(self, tracked_order: InFlightOrder) -> Dict:
-        exchange_symbol = await self.exchange_symbol_associated_to_pair(tracked_order.trading_pair)
-        data = {
-            "symbol": exchange_symbol,
-            "clientOrderId": tracked_order.client_order_id
+        if tracked_order.exchange_order_id is None:
+            return None
+            
+        params = {
+            "order_id": tracked_order.exchange_order_id
         }
-        
-        if tracked_order.exchange_order_id is not None:
-            data["orderId"] = tracked_order.exchange_order_id
 
-        resp = await self._api_post(
-            path_url=CONSTANTS.ORDER_DETAILS,
-            data=data,
+        r = await self._api_get(
+            path_url=CONSTANTS.ORDER_TRADES,
+            params=params,
             is_auth_required=True,
         )
 
-        return resp
+        return r["result"]
+
+    async def _request_order_status_data(self, tracked_order: InFlightOrder) -> Dict:
+
+        if tracked_order.exchange_order_id is None:
+            return None
+            
+        params = {
+            "order_id": tracked_order.exchange_order_id
+        }
+
+        r = await self._api_get(
+            path_url=CONSTANTS.ORDER_DETAILS,
+            params=params,
+            is_auth_required=True,
+        )
+
+        return r["result"]
     
-    def _parse_websocket_trade_update(self, trade_msg: Dict, tracked_order: InFlightOrder) -> TradeUpdate:
-        # print("[WS TRADE]")
-        # print(trade_msg)
+    def _parse_trade_update(self, trade_msg: Dict, tracked_order: InFlightOrder) -> TradeUpdate:
+        trade_id: str = trade_msg["trade_id"]
+        position_action = PositionAction.CLOSE if trade_msg["reduce_only"] else PositionAction.OPEN
 
-        trade_id: str = str(trade_msg["tradeId"])
-
-        fee = TradeFeeBase.new_spot_fee(
+        fee = TradeFeeBase.new_perpetual_fee(
             fee_schema=self.trade_fee_schema(),
-            trade_type=tracked_order.trade_type,
-            percent_token= trade_msg["fillFeeCcy"],
-            flat_fees=[TokenAmount(amount=Decimal(trade_msg["fillFee"]), token=trade_msg["fillFeeCcy"])]
+            position_action=position_action,
+            percent_token= trade_msg["fee_currency"],
+            flat_fees=[TokenAmount(amount=Decimal(trade_msg["fee"]), token=trade_msg["fee_currency"])]
         )
         
-        exec_price = Decimal(trade_msg["fillPx"])
-        exec_amt = Decimal(trade_msg["fillSz"])
-        exec_time = int(trade_msg["fillTime"]) * 1e-3
+        exec_price = Decimal(trade_msg["price"])
+        exec_amt = Decimal(trade_msg["amount"])
+        exec_time = int(trade_msg["timestamp"])
 
         trade_update: TradeUpdate = TradeUpdate(
             trade_id=trade_id,
             client_order_id=tracked_order.client_order_id,
-            exchange_order_id=str(trade_msg["ordId"]),
+            exchange_order_id=tracked_order.exchange_order_id,
             trading_pair=tracked_order.trading_pair,
             fill_timestamp=exec_time,
             fill_price=exec_price,
-            fill_base_amount=Decimal(trade_msg["fillSz"]),
+            fill_base_amount=exec_amt,
             fill_quote_amount=Decimal(exec_price * exec_amt),
             fee=fee,
         )
 
         return trade_update
 
-    def _parse_trade_update(self, trade_msg: Dict, tracked_order: InFlightOrder) -> TradeUpdate:
-        trade_id: str = str(trade_msg["fillId"])
-
-        fee = TradeFeeBase.new_spot_fee(
-            fee_schema=self.trade_fee_schema(),
-            trade_type=tracked_order.trade_type,
-            percent_token=trade_msg["feeCcy"],
-            flat_fees=[TokenAmount(amount=Decimal(trade_msg["fees"]), token=trade_msg["feeCcy"])]
-        )
-
-        exec_price = Decimal(trade_msg["fillPrice"])
-        exec_time = int(trade_msg["cTime"]) * 1e-3
-
-        trade_update: TradeUpdate = TradeUpdate(
-            trade_id=trade_id,
-            client_order_id=tracked_order.client_order_id,
-            exchange_order_id=str(trade_msg["orderId"]),
-            trading_pair=tracked_order.trading_pair,
-            fill_timestamp=exec_time,
-            fill_price=exec_price,
-            fill_base_amount=Decimal(trade_msg["fillQuantity"]),
-            fill_quote_amount=Decimal(trade_msg["fillTotalAmount"]),
-            fee=fee,
-        )
-
-        return trade_update
 
     #endregion
     
@@ -580,9 +570,6 @@ class DeribitExchange(ExchangePyBase):
     async def _update_balances(self):
         self._account_available_balances.clear()
         self._account_balances.clear()
-        
-        for trading_pair in self._trading_pairs:
-            print(trading_pair)
         
         for ccy in CONSTANTS.CURRENCIES:
             r = await self._api_request(

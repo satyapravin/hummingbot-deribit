@@ -1,6 +1,5 @@
 from decimal import Decimal
 from typing import Any, Dict
-
 from pydantic import Field, SecretStr
 
 from hummingbot.client.config.config_data_types import BaseConnectorConfigMap, ClientFieldData
@@ -13,7 +12,7 @@ DEFAULT_FEES = TradeFeeSchema(
 
 CENTRALIZED = True
 
-EXAMPLE_PAIR = "BTCUSDT"
+EXAMPLE_PAIR = "BTC-USDT"
 
 class DeribitConfigMap(BaseConnectorConfigMap):
     connector: str = Field(default="deribit", const=True, client_data=None)
@@ -44,5 +43,5 @@ def is_exchange_information_valid(exchange_info: Dict[str, Any]) -> bool:
     :param exchange_info: the exchange information for a trading pair
     :return: True if the trading pair is enabled, False otherwise
     """
-    symbol = exchange_info.get("symbol")
-    return symbol is not None and symbol.count("_") <= 1
+    is_active = exchange_info.get("is_active", False)
+    return is_active

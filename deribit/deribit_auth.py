@@ -1,13 +1,7 @@
-import base64
-import hmac
 import time
-import json
 import requests
 
-from urllib.parse import urlencode
-from collections import OrderedDict
-from datetime import datetime
-from typing import Any, Dict, Optional, List
+from typing import Any, Dict, List
 from urllib.parse import urlencode
 
 from hummingbot.connector.time_synchronizer import TimeSynchronizer
@@ -17,7 +11,6 @@ import hummingbot.connector.exchange.deribit.deribit_constants as CONSTANTS
 
 class DeribitAuth(AuthBase):
     cred = { "expires_at": 0 }
-    ws_cred = { "expires_at": 0 }
 
     def __init__(self, client_id: str, client_secret: str):
         self.client_id = client_id
@@ -67,10 +60,9 @@ class DeribitAuth(AuthBase):
         }
 
     def auth_req(self, r: RESTRequest):
-        cred = self.get_credentials()
+        self.get_credentials()
         token = self.cred["access_token"]
-        # print(token)
-        
+
         headers = {
             "Authorization": f"Bearer {token}",
             "Content-Type": "application/json"
@@ -82,27 +74,39 @@ class DeribitAuth(AuthBase):
         now = time.time()
         expires_at = self.cred["expires_at"]
         
+        # Return token if still valid
         if "access_token" in self.cred and now < expires_at:
-            print("cached...")
             return self.cred
         
+        # Try refreshing
         if "refresh_token" in self.cred and now > expires_at:
-            print("refreshed...")
-            r = requests.get(
-                url=f"{CONSTANTS.API_BASE_URL}public/auth",
-                params={
-                    "client_id": self.client_id,
-                    "client_secret": self.client_secret,
-                    "grant_type": "refresh_token",
-                    "refresh_token": self.cred["refresh_token"]
-                },
-            )
+            try:
+                r = requests.get(
+                    url=f"{CONSTANTS.API_BASE_URL}public/auth",
+                    params={
+                        "client_id": self.client_id,
+                        "client_secret": self.client_secret,
+                        "grant_type": "refresh_token",
+                        "refresh_token": self.cred["refresh_token"]
+                    },
+                )
+                
+                data = r.json()
+                result = data.get("result")
+                error = data.get("error")
+                
+                if error:
+                    raise error.get("message", "Token refresh error!")
+                
+                if result:
+                    self.cred = result
+                    self.cred["expires_at"] = now + self.cred["expires_in"]
+                    return self.cred
             
-            self.cred = r.json()["result"]
-            self.cred["expires_at"] = now + self.cred["expires_in"]
-            return self.cred
-            
-        print("new...")
+            except Exception as e:
+                print("[ERROR: REFRESH FAILED]", e)
+
+        # Just get new token   
         r = requests.get(
             url=f"{CONSTANTS.API_BASE_URL}public/auth",
             params={
@@ -112,7 +116,14 @@ class DeribitAuth(AuthBase):
             },
         )
         
-        self.cred = r.json()["result"]
-        self.cred["expires_at"] = now + self.cred["expires_in"]
+        data = r.json()
+        result = data.get("result")
+        error = data.get("error")
         
-        return self.cred
+        if error:
+            raise error.get("message", "Token request error!")
+        
+        if result:
+            self.cred = result
+            self.cred["expires_at"] = now + self.cred["expires_in"]
+            return self.cred
