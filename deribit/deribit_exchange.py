@@ -384,28 +384,40 @@ class DeribitExchange(ExchangePyBase):
         if order_type.is_limit_type():
             data["price"] = str(price)
             
-        r = await self._api_get(
-            path_url=url,
-            params=data,
-            is_auth_required=True,
-        )
+        try:
+            r = await self._api_get(
+                path_url=url,
+                params=data,
+                is_auth_required=True,
+            )
 
-        error = r.get("error")
-        result = r.get("result")
-        
-        if error:
-            code = error.get("code", "[NO CODE]")
-            message = error.get("message", "[UKNOWN ERROR]")
-            raise IOError(f"Error submitting order {order_id}: {code} - {message}")
-        
-        else:
-            order = result.get("order", {})
-            id = order.get("order_id", None)
+            error = r.get("error")
+            result = r.get("result")
             
-            if id is None:
-                raise IOError(f"Error submitting order {order_id}: Order missing in response!")
+            if error:
+                code = error.get("code", "[NO CODE]")
+                message = error.get("message", "[UKNOWN ERROR]")
+                raise IOError(f"Error submitting order {order_id}: {code} - {message}")
             
-            return id, self.current_timestamp
+            else:
+                order = result.get("order", {})
+                id = order.get("order_id", None)
+                
+                if id is None:
+                    raise IOError(f"Error submitting order {order_id}: Order missing in response!")
+                
+                return id, self.current_timestamp
+            
+        except Exception as ex:
+            api_err = get_api_error(str(ex))
+
+            if api_err:
+                err = api_err.get("error")
+                
+                if err:
+                    raise IOError(f"Error submitting order {order_id}: ({err['code']}) {err['message']}")
+                
+            raise ex
 
 
     async def _place_cancel(self, order_id: str, tracked_order: InFlightOrder):
@@ -423,7 +435,6 @@ class DeribitExchange(ExchangePyBase):
                 is_auth_required=True,
             )
             
-            result = r.get("result")
             error = r.get("error")
 
             if error:
@@ -439,10 +450,13 @@ class DeribitExchange(ExchangePyBase):
 
             if api_err:
                 err = api_err.get("error")
+                
                 if err["code"] == CONSTANTS.RET_CODE_ORDER_NOT_EXISTS:
                     await self._order_tracker.process_order_not_found(order_id)
                     self.logger().info(f"Order {order_id} not found, now marked as cancelled !")
                     return True
+                else:
+                    raise IOError(f"API Error {err['code']} : {err['message']}")
                 
             raise ex
 

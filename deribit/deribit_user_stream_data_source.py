@@ -33,6 +33,7 @@ class DeribitUserStreamDataSource(UserStreamTrackerDataSource):
         self._auth = auth
         self._trading_pairs = trading_pairs
         self._connector = connector
+        self._heartbeat_response_pending = False
         self.loop = asyncio.get_event_loop()
         self.loop.create_task(
             self._refresh_auth()
@@ -72,14 +73,18 @@ class DeribitUserStreamDataSource(UserStreamTrackerDataSource):
             try:
                 await asyncio.wait_for(
                     super()._process_websocket_messages(websocket_assistant=websocket_assistant, queue=queue),
-                    timeout=CONSTANTS.SECONDS_TO_WAIT_TO_RECEIVE_MESSAGE)
+                    timeout=CONSTANTS.WS_HEARTBEAT_INTERVAL)
             except asyncio.TimeoutError:
-                await self.heartbeat_response(websocket_assistant)
+                if self._heartbeat_response_pending:
+                    await self.heartbeat_response(websocket_assistant)
+            except asyncio.CancelledError:
+                raise
 
     async def _process_event_message(self, event_message: Dict[str, Any], queue: asyncio.Queue):
         method = event_message.get("method")
         
         if method == "heartbeat":
+            self._heartbeat_response_pending = True
             await self.heartbeat_response(self.ws)
             return
         
@@ -91,9 +96,7 @@ class DeribitUserStreamDataSource(UserStreamTrackerDataSource):
             "jsonrpc": "2.0",
             "id": 9098,
             "method": "public/set_heartbeat",
-            "params": {
-                        "interval": 10
-                        }
+            "params": { "interval": CONSTANTS.WS_HEARTBEAT_INTERVAL }
         }
 
         req: WSJSONRequest = WSJSONRequest(payload=payload)
@@ -109,6 +112,7 @@ class DeribitUserStreamDataSource(UserStreamTrackerDataSource):
 
         req: WSJSONRequest = WSJSONRequest(payload=payload)
         await websocket_assistant.send(req)
+        self._heartbeat_response_pending = False
 
     async def _subscribe_channels(self, websocket_assistant: WSAssistant):
         try:
@@ -138,7 +142,7 @@ class DeribitUserStreamDataSource(UserStreamTrackerDataSource):
         self.ws = await self._api_factory.get_ws_assistant()
         await self.ws.connect(
             ws_url=CONSTANTS.WSS_BASE_URL,
-            message_timeout=CONSTANTS.SECONDS_TO_WAIT_TO_RECEIVE_MESSAGE)
+            message_timeout=CONSTANTS.WS_HEARTBEAT_INTERVAL)
         await self._authenticate(self.ws)
         await self.establish_hearbeat(self.ws)
         return self.ws

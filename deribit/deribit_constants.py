@@ -16,7 +16,7 @@ DEFAULT_DOMAIN = ""
 
 CLIENT_ID_PREFIX = "DRBT-"
 MAX_ID_LEN = 32
-SECONDS_TO_WAIT_TO_RECEIVE_MESSAGE = 60
+WS_HEARTBEAT_INTERVAL = 30
 
 DEFAULT_TIME_IN_FORCE = "normal"
 
@@ -49,22 +49,23 @@ ORDER_STATE = {
 
 # Request error codes
 RET_CODE_ORDER_NOT_EXISTS = 11044
+RET_CODE_OFFLINE = 13028
 
 def DefaultLimit(limit_id, limit = 5):
   return RateLimit(limit_id=limit_id,limit=limit,time_interval=1)
 
 # Rate limits
 RATE_LIMITS = [
-    DefaultLimit(ACCOUNT),
+    DefaultLimit(ACCOUNT, 20),
     DefaultLimit(BUY),
     DefaultLimit(CANCEL),
     DefaultLimit(EDIT),
-    DefaultLimit(INSTRUMENT),
+    DefaultLimit(INSTRUMENT, 20),
     DefaultLimit(INSTRUMENTS, 20),
     DefaultLimit(ORDER_BOOK),
-    DefaultLimit(ORDER_DETAILS),
-    DefaultLimit(ORDER_TRADES),
+    DefaultLimit(ORDER_DETAILS, 20),
+    DefaultLimit(ORDER_TRADES, 20),
     DefaultLimit(SELL),
     DefaultLimit(TICKER, 20),
-    DefaultLimit(TIME),
+    DefaultLimit(TIME, 20),
 ]

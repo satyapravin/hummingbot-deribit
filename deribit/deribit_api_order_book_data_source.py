@@ -126,12 +126,12 @@ class DeribitAPIOrderBookDataSource(OrderBookTrackerDataSource):
 
     def _channel_originating_message(self, event_message: Dict[str, Any]) -> str:
         params = event_message.get("params")
-        result = event_message.get("result")
         method = event_message.get("method")
         
         if method == "heartbeat":
+            self.logger().info("[HB]", event_message)
             self._heartbeat_response_pending  = True
-            return
+            return ""
         
         if params:
             if "book" in params.get("channel", ""):
@@ -140,8 +140,8 @@ class DeribitAPIOrderBookDataSource(OrderBookTrackerDataSource):
             if "trades" in params.get("channel", ""):
                 return self._trade_messages_queue_key
                    
-        # self.logger().info("[UNKOWN OB EVT]")
-        # self.logger().info(event_message)
+        self.logger().info("[UNKOWN OB EVT]")
+        self.logger().info(event_message)
         return ""
  
     async def _process_websocket_messages(self, websocket_assistant: WSAssistant):
@@ -149,12 +149,20 @@ class DeribitAPIOrderBookDataSource(OrderBookTrackerDataSource):
             try:
                 await asyncio.wait_for(
                     super()._process_websocket_messages(websocket_assistant=websocket_assistant),
-                    timeout=CONSTANTS.SECONDS_TO_WAIT_TO_RECEIVE_MESSAGE)
+                    timeout=CONSTANTS.WS_HEARTBEAT_INTERVAL)
             except asyncio.TimeoutError:
                 if self._heartbeat_response_pending:
                     self.heartbeat_response(websocket_assistant)
-                else:
-                    raise IOError("Deribit order book stream in unresponsive")
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                self.logger().error(
+                    "Unexpected error occurred when listening to order book streams. Retrying in 5 seconds...",
+                    exc_info=True,
+                )
+                await self._sleep(5.0)
+            finally:
+                websocket_assistant and await websocket_assistant.disconnect()
     
     async def _subscribe_channels(self, ws: WSAssistant):
         try:
@@ -188,7 +196,7 @@ class DeribitAPIOrderBookDataSource(OrderBookTrackerDataSource):
             "jsonrpc": "2.0",
             "id": 9098,
             "method": "public/set_heartbeat",
-            "params": { "interval": 10 }
+            "params": { "interval": CONSTANTS.WS_HEARTBEAT_INTERVAL }
         }
 
         req: WSJSONRequest = WSJSONRequest(payload=payload)
@@ -205,6 +213,7 @@ class DeribitAPIOrderBookDataSource(OrderBookTrackerDataSource):
 
         req: WSJSONRequest = WSJSONRequest(payload=payload)
         await websocket_assistant.send(req)
+        self.logger().info("[PONG]")
 
     async def monitor_heartbeat(self):
         while True:
@@ -212,12 +221,12 @@ class DeribitAPIOrderBookDataSource(OrderBookTrackerDataSource):
                 self._heartbeat_response_pending = False
                 await self.heartbeat_response(self.ws)
                 
-            await asyncio.sleep(1)
+            await asyncio.sleep(2)
 
     async def _connected_websocket_assistant(self) -> WSAssistant:
         self.ws: WSAssistant = await self._api_factory.get_ws_assistant()
         await self.ws.connect(
-            ws_url=CONSTANTS.WSS_BASE_URL, message_timeout=CONSTANTS.SECONDS_TO_WAIT_TO_RECEIVE_MESSAGE
+            ws_url=CONSTANTS.WSS_BASE_URL, message_timeout=CONSTANTS.WS_HEARTBEAT_INTERVAL
         )
         await self.establish_hearbeat(self.ws)
         return self.ws
