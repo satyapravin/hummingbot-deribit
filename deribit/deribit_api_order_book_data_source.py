@@ -9,7 +9,6 @@ from hummingbot.core.web_assistant.connections.data_types import RESTMethod, WSJ
 from hummingbot.core.web_assistant.web_assistants_factory import WebAssistantsFactory
 from hummingbot.core.web_assistant.ws_assistant import WSAssistant
 from hummingbot.logger import HummingbotLogger
-import time
 
 if TYPE_CHECKING:
     from hummingbot.connector.exchange.deribit.deribit_exchange import DeribitExchange
@@ -70,8 +69,6 @@ class DeribitAPIOrderBookDataSource(OrderBookTrackerDataSource):
             }
         )
         
-        # print("[BOOK]", r["result"]["timestamp"])
-        
         return r["result"]
  
     async def _parse_order_book_diff_message(self, raw_message: Dict[str, Any], message_queue: asyncio.Queue):
@@ -98,7 +95,6 @@ class DeribitAPIOrderBookDataSource(OrderBookTrackerDataSource):
             timestamp=timestamp
         )
         
-        # print("[SNAP]", snapshot_msg)
         message_queue.put_nowait(snapshot_msg)
 
     async def _parse_trade_message(self, raw_message: Dict[str, Any], message_queue: asyncio.Queue):
@@ -144,8 +140,8 @@ class DeribitAPIOrderBookDataSource(OrderBookTrackerDataSource):
             if "trades" in params.get("channel", ""):
                 return self._trade_messages_queue_key
                    
-        self.logger().info("[UNKOWN OB EVT]")
-        self.logger().info(event_message)
+        # self.logger().info("[UNKOWN OB EVT]")
+        # self.logger().info(event_message)
         return ""
  
     async def _process_websocket_messages(self, websocket_assistant: WSAssistant):
@@ -192,9 +188,7 @@ class DeribitAPIOrderBookDataSource(OrderBookTrackerDataSource):
             "jsonrpc": "2.0",
             "id": 9098,
             "method": "public/set_heartbeat",
-            "params": {
-                        "interval": 10
-                        }
+            "params": { "interval": 10 }
         }
 
         req: WSJSONRequest = WSJSONRequest(payload=payload)

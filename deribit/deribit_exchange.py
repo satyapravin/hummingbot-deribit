@@ -172,8 +172,8 @@ class DeribitExchange(ExchangePyBase):
         """
         async for event_message in self._iter_user_event_queue():
             try:
-                print("[USER EVT]")
-                print(event_message)
+                # print("[USER EVT]")
+                # print(event_message)
                 params = event_message.get("params")
                 
                 if params is None: return
@@ -433,14 +433,7 @@ class DeribitExchange(ExchangePyBase):
             
             else:
                 return True
-            
-            # if response_code != CONSTANTS.RET_CODE_OK:
-            #     if response_code == CONSTANTS.RET_CODE_ORDER_NOT_EXISTS:
-            #         await self._order_tracker.process_order_not_found(order_id)
-                    
-            #     raise IOError(f"{res['code']} - {res['msg']}")
-
-            
+ 
         except Exception as ex:
             api_err = get_api_error(str(ex))
 
@@ -448,7 +441,7 @@ class DeribitExchange(ExchangePyBase):
                 err = api_err.get("error")
                 if err["code"] == CONSTANTS.RET_CODE_ORDER_NOT_EXISTS:
                     await self._order_tracker.process_order_not_found(order_id)
-                    self.logger().info(f"{order_id} not found, now marked as cancelled !")
+                    self.logger().info(f"Order {order_id} not found, now marked as cancelled !")
                     return True
                 
             raise ex
@@ -562,8 +555,6 @@ class DeribitExchange(ExchangePyBase):
         )
 
         return trade_update
-
-
     #endregion
     
     #region Balance
